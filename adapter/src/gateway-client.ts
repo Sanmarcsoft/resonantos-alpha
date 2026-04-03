@@ -47,12 +47,13 @@ export class GatewayClient {
     try {
       const env = {
         ...process.env,
+        PATH: `/run/current-system/sw/bin:${process.env.PATH ?? ""}`,
         OPENCLAW_GATEWAY_URL: this.opts.url.replace("ws://", "http://").replace("wss://", "https://"),
         OPENCLAW_GATEWAY_TOKEN: this.opts.token,
       };
 
       const escaped = message.replace(/'/g, "'\\''");
-      const cmd = `openclaw agent --agent main --message '${escaped}' --json 2>/dev/null`;
+      const cmd = `openclaw agent --agent main --message '${escaped}' --json`;
       const output = execSync(cmd, {
         timeout: this.timeoutMs,
         env,
