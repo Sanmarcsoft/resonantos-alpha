@@ -58,7 +58,7 @@ export class GatewayClient {
               minProtocol: 3,
               maxProtocol: 3,
               role: "operator",
-              scopes: ["operator.write", "operator.read"],
+              scopes: ["operator.admin"], // gateway only supports admin scope
               caps: [],
               client: {
                 id: "gateway-client",
