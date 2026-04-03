@@ -1,8 +1,14 @@
 {
-  "name": "adapter",
-  "module": "index.ts",
+  "name": "zorin-adapter",
+  "version": "1.0.0",
+  "description": "MCP-to-OpenClaw bridge for Max Zorin agent",
+  "module": "src/main.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "test": "bun test"
+  },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/ws": "^8.18.1"
