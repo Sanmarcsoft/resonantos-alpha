@@ -61,7 +61,7 @@ export class GatewayClient {
               scopes: ["operator.write", "operator.read"],
               caps: [],
               client: {
-                id: "zorin-adapter",
+                id: "gateway-client",
                 mode: "backend",
                 version: "1.0.0",
                 platform: "linux",
