@@ -1,17 +1,26 @@
-import { randomUUID } from "crypto";
+import { randomUUID, timingSafeEqual } from "crypto";
 import { GatewayClient } from "./gateway-client";
 import { VoiceSpeaker } from "./voice-speaker";
 import { McpAdapter } from "./mcp-adapter";
 
+const MAX_MESSAGE_LEN = 32_000;
+
 export interface McpServerOptions {
   port: number;
+  bindAddress?: string;
   gatewayUrl: string;
   gatewayToken: string;
   voiceProxyUrl: string;
+  authToken?: string;
 }
 
 export interface McpServerHandle {
   stop: () => Promise<void>;
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
 export async function startMcpServer(opts: McpServerOptions): Promise<McpServerHandle> {
@@ -29,13 +38,32 @@ export async function startMcpServer(opts: McpServerOptions): Promise<McpServerH
 
   const server = Bun.serve({
     port: opts.port,
+    hostname: opts.bindAddress ?? "127.0.0.1",
     async fetch(req) {
       const url = new URL(req.url);
       if (url.pathname !== "/mcp" || req.method !== "POST") {
         return new Response("Not Found", { status: 404 });
       }
 
-      const body = await req.json();
+      // Auth guard
+      if (opts.authToken) {
+        const auth = req.headers.get("Authorization") ?? "";
+        const provided = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+        if (!provided || !constantTimeEqual(provided, opts.authToken)) {
+          return new Response("Unauthorized", { status: 401 });
+        }
+      }
+
+      let body: any;
+      try {
+        body = await req.json();
+      } catch {
+        return Response.json(
+          { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } },
+          { status: 400 }
+        );
+      }
+
       const { method, id, params } = body;
 
       if (method === "initialize") {
@@ -55,6 +83,16 @@ export async function startMcpServer(opts: McpServerOptions): Promise<McpServerH
         );
       }
 
+      // Session validation for all non-initialize methods
+      const sessionId = req.headers.get("mcp-session-id");
+      if (!sessionId || !sessions.has(sessionId)) {
+        return Response.json({
+          jsonrpc: "2.0",
+          id,
+          error: { code: -32600, message: "Invalid or missing session" },
+        });
+      }
+
       if (method === "tools/list") {
         return Response.json({
           jsonrpc: "2.0",
@@ -68,8 +106,17 @@ export async function startMcpServer(opts: McpServerOptions): Promise<McpServerH
         const args = params?.arguments ?? {};
 
         if (toolName === "send_task" || toolName === "respond") {
+          const rawMessage = args.message ?? "";
+          if (rawMessage.length > MAX_MESSAGE_LEN) {
+            return Response.json({
+              jsonrpc: "2.0",
+              id,
+              error: { code: -32602, message: `Message exceeds maximum length of ${MAX_MESSAGE_LEN} characters` },
+            });
+          }
+
           try {
-            const result = await gateway.sendTask(args.message ?? "");
+            const result = await gateway.sendTask(rawMessage);
             const responseText = result.response ?? JSON.stringify(result);
 
             // Multiplex: speak summary via voice, return full data
@@ -88,10 +135,14 @@ export async function startMcpServer(opts: McpServerOptions): Promise<McpServerH
               },
             });
           } catch (err: any) {
+            console.error("[zorin-adapter] Tool call error:", err);
+            const userMessage = err.message?.includes("timeout")
+              ? "Request timed out"
+              : "Internal error";
             return Response.json({
               jsonrpc: "2.0",
               id,
-              error: { code: -32000, message: err.message },
+              error: { code: -32000, message: userMessage },
             });
           }
         }

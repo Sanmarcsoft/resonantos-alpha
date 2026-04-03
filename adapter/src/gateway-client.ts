@@ -5,6 +5,7 @@ export interface GatewayClientOptions {
   url: string;
   token: string;
   requestTimeoutMs?: number;
+  onClose?: () => void;
 }
 
 interface PendingRequest {
@@ -38,7 +39,13 @@ export class GatewayClient {
       });
 
       this.ws.on("message", (data) => {
-        const msg = JSON.parse(data.toString());
+        let msg: any;
+        try {
+          msg = JSON.parse(data.toString());
+        } catch {
+          console.error("[zorin-adapter] Malformed gateway message, ignoring");
+          return;
+        }
 
         if (msg.type === "event" && msg.event === "connect.challenge") {
           const id = randomUUID();
@@ -51,7 +58,7 @@ export class GatewayClient {
               minProtocol: 3,
               maxProtocol: 3,
               role: "operator",
-              scopes: ["operator.admin"],
+              scopes: ["operator.write", "operator.read"],
               caps: [],
               client: {
                 id: "zorin-adapter",
@@ -62,7 +69,6 @@ export class GatewayClient {
             },
           }));
 
-          // Store pending connect request
           const timer = setTimeout(() => {
             this.ws?.close();
             reject(new Error("Connect timeout"));
@@ -90,11 +96,12 @@ export class GatewayClient {
 
       this.ws.on("close", () => {
         this.connected = false;
+        this.opts.onClose?.();
       });
     });
   }
 
-  sendTask(message: string, agentId?: string): Promise<any> {
+  sendTask(message: string): Promise<any> {
     if (!this.ws || !this.connected) {
       return Promise.reject(new Error("Not connected"));
     }
@@ -114,7 +121,7 @@ export class GatewayClient {
         method: "agent",
         params: {
           message,
-          agentId: agentId ?? "main",
+          agentId: "main",
           idempotencyKey: randomUUID(),
         },
       }));
