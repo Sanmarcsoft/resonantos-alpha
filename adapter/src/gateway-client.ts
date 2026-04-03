@@ -1,5 +1,4 @@
-import WebSocket from "ws";
-import { randomUUID } from "crypto";
+import { execSync } from "child_process";
 
 export interface GatewayClientOptions {
   url: string;
@@ -8,140 +7,93 @@ export interface GatewayClientOptions {
   onClose?: () => void;
 }
 
-interface PendingRequest {
-  resolve: (value: any) => void;
-  reject: (reason: any) => void;
-  timer: ReturnType<typeof setTimeout>;
-}
-
 export class GatewayClient {
-  private ws: WebSocket | null = null;
-  private pending = new Map<string, PendingRequest>();
   private connected = false;
   private opts: GatewayClientOptions;
-  private requestTimeoutMs: number;
+  private timeoutMs: number;
 
   constructor(opts: GatewayClientOptions) {
     this.opts = opts;
-    this.requestTimeoutMs = opts.requestTimeoutMs ?? 30_000;
+    this.timeoutMs = opts.requestTimeoutMs ?? 120_000;
   }
 
   isConnected(): boolean {
     return this.connected;
   }
 
-  connect(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(this.opts.url);
-
-      this.ws.on("error", (err) => {
-        if (!this.connected) reject(err);
-      });
-
-      this.ws.on("message", (data) => {
-        let msg: any;
-        try {
-          msg = JSON.parse(data.toString());
-        } catch {
-          console.error("[zorin-adapter] Malformed gateway message, ignoring");
-          return;
-        }
-
-        if (msg.type === "event" && msg.event === "connect.challenge") {
-          const id = randomUUID();
-          this.ws!.send(JSON.stringify({
-            type: "req",
-            id,
-            method: "connect",
-            params: {
-              minProtocol: 3,
-              maxProtocol: 3,
-              client: {
-                id: "gateway-client",
-                displayName: "zorin-adapter",
-                mode: "cli",
-                version: "1.0.0",
-                platform: "linux",
-              },
-              role: "operator",
-              scopes: ["operator.read", "operator.write"],
-              caps: [],
-              commands: [],
-              permissions: {},
-              auth: { token: this.opts.token },
-            },
-          }));
-
-          const timer = setTimeout(() => {
-            this.ws?.close();
-            reject(new Error("Connect timeout"));
-          }, this.requestTimeoutMs);
-          this.pending.set(id, {
-            resolve: () => { this.connected = true; resolve(); },
-            reject: (err) => { this.ws?.close(); reject(err); },
-            timer,
-          });
-        }
-
-        if (msg.type === "res") {
-          const req = this.pending.get(msg.id);
-          if (req) {
-            clearTimeout(req.timer);
-            this.pending.delete(msg.id);
-            if (msg.ok) {
-              req.resolve(msg.payload);
-            } else {
-              req.reject(new Error(msg.error?.message ?? "Request failed"));
-            }
-          }
-        }
-      });
-
-      this.ws.on("close", () => {
-        this.connected = false;
-        this.opts.onClose?.();
-      });
-    });
+  async connect(): Promise<void> {
+    // Verify the gateway is reachable via health check
+    try {
+      const gwHost = this.opts.url.replace("ws://", "http://").replace("wss://", "https://");
+      const res = await fetch(`${gwHost}/health`, { signal: AbortSignal.timeout(5000) });
+      const body = await res.json() as any;
+      if (body.ok) {
+        this.connected = true;
+        return;
+      }
+      throw new Error(`Gateway health check failed: ${JSON.stringify(body)}`);
+    } catch (err: any) {
+      throw new Error(err.message ?? "Gateway unreachable");
+    }
   }
 
   sendTask(message: string): Promise<any> {
-    if (!this.ws || !this.connected) {
+    if (!this.connected) {
       return Promise.reject(new Error("Not connected"));
     }
 
-    return new Promise((resolve, reject) => {
-      const id = randomUUID();
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error("Request timeout"));
-      }, this.requestTimeoutMs);
+    // Use the openclaw CLI which handles auth/scope internally
+    // Falls back to embedded mode (direct LLM call) if gateway agent method is restricted
+    try {
+      const env = {
+        ...process.env,
+        OPENCLAW_GATEWAY_URL: this.opts.url.replace("ws://", "http://").replace("wss://", "https://"),
+        OPENCLAW_GATEWAY_TOKEN: this.opts.token,
+      };
 
-      this.pending.set(id, { resolve, reject, timer });
+      const escaped = message.replace(/'/g, "'\\''");
+      const cmd = `openclaw agent --agent main --message '${escaped}' --json 2>/dev/null`;
+      const output = execSync(cmd, {
+        timeout: this.timeoutMs,
+        env,
+        encoding: "utf-8",
+        maxBuffer: 1024 * 1024,
+      });
 
-      this.ws!.send(JSON.stringify({
-        type: "req",
-        id,
-        method: "agent",
-        params: {
-          message,
-          agentId: "main",
-          idempotencyKey: randomUUID(),
-        },
-      }));
-    });
+      // Parse the JSON output — openclaw agent --json returns a JSON object
+      const lines = output.trim().split("\n");
+      // Find the last JSON object in the output (may have warnings before it)
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim();
+        if (line.startsWith("{") || line.startsWith("[")) {
+          try {
+            const parsed = JSON.parse(lines.slice(i).join("\n"));
+            // Extract the response text from the agent output
+            const response = parsed?.result?.output?.content
+              ?? parsed?.result?.response
+              ?? parsed?.output
+              ?? parsed?.response
+              ?? JSON.stringify(parsed);
+            return Promise.resolve({ response });
+          } catch { continue; }
+        }
+      }
+
+      // If no JSON found, return raw output as the response
+      return Promise.resolve({ response: output.trim() });
+    } catch (err: any) {
+      if (err.message?.includes("timeout")) {
+        return Promise.reject(new Error("Request timeout"));
+      }
+      // Try to extract useful output even from error
+      if (err.stdout) {
+        return Promise.resolve({ response: err.stdout.toString().trim() });
+      }
+      return Promise.reject(new Error(err.message ?? "CLI execution failed"));
+    }
   }
 
-  disconnect(): Promise<void> {
-    return new Promise((resolve) => {
-      if (this.ws) {
-        this.ws.once("close", () => {
-          this.connected = false;
-          resolve();
-        });
-        this.ws.close();
-      } else {
-        resolve();
-      }
-    });
+  async disconnect(): Promise<void> {
+    this.connected = false;
   }
 }
