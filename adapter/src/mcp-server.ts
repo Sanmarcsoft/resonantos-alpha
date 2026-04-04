@@ -41,6 +41,9 @@ export async function startMcpServer(opts: McpServerOptions): Promise<McpServerH
     hostname: opts.bindAddress ?? "127.0.0.1",
     async fetch(req) {
       const url = new URL(req.url);
+      if (url.pathname === "/health") {
+        return Response.json({ ok: true, agent: "zorin", connected: gateway.isConnected() });
+      }
       if (url.pathname !== "/mcp" || req.method !== "POST") {
         return new Response("Not Found", { status: 404 });
       }
