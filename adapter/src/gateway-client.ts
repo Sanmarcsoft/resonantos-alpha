@@ -45,18 +45,11 @@ export class GatewayClient {
     // Use the openclaw CLI which handles auth/scope internally
     // Falls back to embedded mode (direct LLM call) if gateway agent method is restricted
     try {
-      const env = {
-        ...process.env,
-        PATH: `/run/current-system/sw/bin:${process.env.PATH ?? ""}`,
-        OPENCLAW_GATEWAY_URL: this.opts.url.replace("ws://", "http://").replace("wss://", "https://"),
-        OPENCLAW_GATEWAY_TOKEN: this.opts.token,
-      };
-
       const escaped = message.replace(/'/g, "'\\''");
-      const cmd = `openclaw agent --agent main --message '${escaped}' --json`;
+      const sshCmd = process.env.ZORIN_SSH_CMD ?? "ssh -p 2223 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR openclaw@127.0.0.1";
+      const cmd = `${sshCmd} 'openclaw agent --agent main --message '"'"'${escaped}'"'"' --json'`;
       const output = execSync(cmd, {
         timeout: this.timeoutMs,
-        env,
         encoding: "utf-8",
         maxBuffer: 1024 * 1024,
       });
